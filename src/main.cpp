@@ -18,13 +18,13 @@ TFT_eSPI tft = TFT_eSPI();
 #define PIN_LED_RED      5  // LED แดง (HP >= 1)
 #define PIN_BUZZER      26  // Passive Buzzer
 
-// Resolution & Entities (โหมดแนวตั้ง Portrait 320x480)
+// Resolution & Entities (Portrait 320x480)
 #define SCREEN_W        320
 #define SCREEN_H        480
 #define PLAYER_SIZE     10
 #define ENEMY_SIZE       8
 #define MAX_ENEMIES     10
-#define MAX_GEMS         8
+#define MAX_GEMS        64  // Increased pool so gems do not get capped
 #define BOMB_RADIUS     55
 
 enum GameState { STATE_TITLE, STATE_PLAYING, STATE_LEVELUP, STATE_GAMEOVER };
@@ -82,6 +82,8 @@ int bombCenterY = 0;
 int menuSelection = 0; // 0 = ATK SPEED, 1 = RANGE
 bool hpBonusAwarded = false;
 unsigned long joyMenuCooldown = 0;
+bool levelUpScreenDrawn = false;
+int lastMenuSelection = -1;
 
 // Audio Timers
 unsigned long buzzerOffTime = 0;
@@ -97,10 +99,6 @@ bool blinkState = false;
 // Backlight Dimmer
 const int pwmFreq = 5000;
 const int pwmResolution = 8;
-
-//level up menu
-bool levelUpScreenDrawn = false;
-int lastMenuSelection = -1;
 
 void setBacklight(uint8_t brightness) {
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
@@ -165,6 +163,7 @@ void spawnEnemy(int idx) {
 }
 
 void spawnGem(float x, float y) {
+  static int nextGemSlot = 0;
   for (int i = 0; i < MAX_GEMS; i++) {
     if (!gems[i].active) {
       gems[i].x = x;
@@ -172,9 +171,20 @@ void spawnGem(float x, float y) {
       gems[i].oldX = x;
       gems[i].oldY = y;
       gems[i].active = true;
-      break;
+      return;
     }
   }
+
+  // Recycle oldest slot if full
+  if (gems[nextGemSlot].active) {
+    tft.fillRect((int)gems[nextGemSlot].x - 3, (int)gems[nextGemSlot].y - 3, 8, 8, TFT_BLACK);
+  }
+  gems[nextGemSlot].x = x;
+  gems[nextGemSlot].y = y;
+  gems[nextGemSlot].oldX = x;
+  gems[nextGemSlot].oldY = y;
+  gems[nextGemSlot].active = true;
+  nextGemSlot = (nextGemSlot + 1) % MAX_GEMS;
 }
 
 void resetGame() {
@@ -234,7 +244,6 @@ void updateTitleScreen() {
     titleScreenDrawn = true;
   }
 
-  // ข้อความกระพริบ
   if (millis() - lastBlinkTime > 400) {
     lastBlinkTime = millis();
     blinkState = !blinkState;
@@ -257,12 +266,11 @@ void updateTitleScreen() {
 }
 
 // --- STATE: LEVEL UP SCREEN ---
-// ฟังก์ชันวาดเฉพาะแถวตัวเลือก 2 แถว
 void drawLevelUpOptions() {
   tft.setTextFont(1);
   tft.setTextSize(2);
 
-  // --- แถวที่ 1 (บน): ATK SPEED ---
+  // Row 1: ATK SPEED
   tft.setCursor(35, 190);
   if (menuSelection == 0) {
     tft.setTextColor(TFT_GREEN, TFT_NAVY);
@@ -273,7 +281,7 @@ void drawLevelUpOptions() {
   }
   tft.printf("ATK SPD (%lums) ", autoAttackInterval);
 
-  // --- แถวที่ 2 (ล่าง): RANGE ---
+  // Row 2: RANGE
   tft.setCursor(35, 240);
   if (menuSelection == 1) {
     tft.setTextColor(TFT_GREEN, TFT_NAVY);
@@ -285,21 +293,17 @@ void drawLevelUpOptions() {
   tft.printf("RANGE   (%dpx)  ", whipRadius);
 }
 
-// --- STATE: LEVEL UP (วาดเฉพาะตอนเปลี่ยนตัวเลือก) ---
 void updateLevelUpScreen() {
-  int rawX = analogRead(PIN_JOY_X); // แกนแนวตั้ง (ขึ้น-ลง)
+  int rawX = analogRead(PIN_JOY_X); // Vertical axis (Up/Down)
 
-  // 1. ตรวจจับการโยกเปลี่ยนเมนู
   if (millis() - joyMenuCooldown > 250) {
     if (rawX < 1400) { 
-      // ดันขึ้น -> เลือกตัวบน
       if (menuSelection != 0) {
         menuSelection = 0;
         playSelectSound();
         joyMenuCooldown = millis();
       }
     } else if (rawX > 2600) { 
-      // ดึงลง -> เลือกตัวล่าง
       if (menuSelection != 1) {
         menuSelection = 1;
         playSelectSound();
@@ -308,7 +312,6 @@ void updateLevelUpScreen() {
     }
   }
 
-  // 2. กดยืนยันการเลือก
   if (digitalRead(PIN_SKILL_BTN) == LOW && (millis() - stateEnterTime > 400)) {
     if (menuSelection == 0) {
       if (autoAttackInterval > 350) autoAttackInterval -= 150;
@@ -323,7 +326,6 @@ void updateLevelUpScreen() {
     return;
   }
 
-  // 3. วาดโครงสร้างกล่องเมนูและข้อความหลักเพียง "ครั้งเดียว" ตอนเข้าหน้า
   if (!levelUpScreenDrawn) {
     tft.fillRect(20, 80, 280, 280, TFT_NAVY);
     tft.drawRect(20, 80, 280, 280, TFT_YELLOW);
@@ -351,16 +353,16 @@ void updateLevelUpScreen() {
     tft.println("[JOY:Up/Down | BTN:Confirm]");
 
     levelUpScreenDrawn = true;
-    drawLevelUpOptions(); // วาดตัวเลือกเริ่มต้น
+    drawLevelUpOptions();
     lastMenuSelection = menuSelection;
   }
 
-  // 4. วาดเฉพาะเมื่อค่า menuSelection เปลี่ยนแปลงเท่านั้น
   if (lastMenuSelection != menuSelection) {
     drawLevelUpOptions();
     lastMenuSelection = menuSelection;
   }
 }
+
 // --- STATE: PLAYING SCREEN ---
 void updatePlayingScreen() {
   survivalTimeSec = (millis() - gameStartTime) / 1000;
@@ -368,20 +370,16 @@ void updatePlayingScreen() {
   oldPlayerX = playerX;
   oldPlayerY = playerY;
 
-  // 1. ควบคุมตัวละคร (Invert X & Y)
+  // 1. Controls with inverted axes
   int rawX = analogRead(PIN_JOY_X);
   int rawY = analogRead(PIN_JOY_Y);
 
-  // --- แนวนอน (แก้สลับ ซ้าย-ขวา ให้ตรงทิศ) ---
-  // ถ้าใช้ rawY คุมแนวนอน:
-  if (rawY > 2600 && playerX > 4) playerX -= 2.8;                          // ไปทางซ้าย (ลดค่า X)
-  if (rawY < 1400 && playerX < SCREEN_W - PLAYER_SIZE - 4) playerX += 2.8;  // ไปทางขวา (เพิ่มค่า X)
+  if (rawY > 2600 && playerX > 4) playerX -= 2.8;                          // Left
+  if (rawY < 1400 && playerX < SCREEN_W - PLAYER_SIZE - 4) playerX += 2.8;  // Right
+  if (rawX > 2600 && playerY < SCREEN_H - PLAYER_SIZE - 4) playerY += 2.8;  // Down
+  if (rawX < 1400 && playerY > 26) playerY -= 2.8;                          // Up
 
-  // --- แนวตั้ง (ขึ้น-ลง) ---
-  if (rawX > 2600 && playerY < SCREEN_H - PLAYER_SIZE - 4) playerY += 2.8;  // ลง
-  if (rawX < 1400 && playerY > 26) playerY -= 2.8;                          // ขึ้น
-
-  // 2. จัดการวงโจมตีแส้
+  // 2. Whip attack visual & cleanup
   if (whipVisualActive && (millis() - whipVisualTimer > 120)) {
     whipVisualActive = false;
     tft.drawCircle(whipCenterX, whipCenterY, activeWhipRadius, TFT_BLACK);
@@ -411,7 +409,7 @@ void updatePlayingScreen() {
     }
   }
 
-  // 3. จัดการวงระเบิดฉุกเฉิน
+  // 3. Emergency Bomb skill visual & cleanup
   if (bombVisualActive && (millis() - bombVisualTimer > 250)) {
     bombVisualActive = false;
     tft.drawCircle(bombCenterX, bombCenterY, BOMB_RADIUS, TFT_BLACK);
@@ -444,7 +442,7 @@ void updatePlayingScreen() {
     if (killedAny) playKillSound();
   }
 
-  // 4. มอนสเตอร์เคลื่อนที่
+  // 4. Enemy movement & collision
   for (int i = 0; i < MAX_ENEMIES; i++) {
     if (!enemies[i].active) {
       if (random(0, 30) == 0) spawnEnemy(i);
@@ -481,7 +479,7 @@ void updatePlayingScreen() {
     }
   }
 
-  // 5. เก็บเพชร Gem
+  // 5. Gem collection
   for (int i = 0; i < MAX_GEMS; i++) {
     if (gems[i].active) {
       float d = sqrt(pow(gems[i].x - playerX, 2) + pow(gems[i].y - playerY, 2));
@@ -517,7 +515,7 @@ void updatePlayingScreen() {
     }
   }
 
-  // 6. ลบและวาดออบเจกต์ (Partial Redraw)
+  // 6. Partial redraws
   if ((int)oldPlayerX != (int)playerX || (int)oldPlayerY != (int)playerY) {
     tft.fillRect((int)oldPlayerX, (int)oldPlayerY, PLAYER_SIZE, PLAYER_SIZE, TFT_BLACK);
   }
@@ -539,7 +537,7 @@ void updatePlayingScreen() {
     }
   }
 
-  // หลอด XP และ HUD ด้านบน
+  // HUD: XP Bar & Status text
   int xpWidth = map(playerXP, 0, xpToNextLevel, 0, SCREEN_W - 8);
   tft.fillRect(4, 4, xpWidth, 4, TFT_GREEN);
   tft.fillRect(4 + xpWidth, 4, (SCREEN_W - 8) - xpWidth, 4, TFT_DARKGREY);
@@ -547,16 +545,17 @@ void updatePlayingScreen() {
   static unsigned long lastHudTime = 0;
   if (millis() - lastHudTime > 300) {
     lastHudTime = millis();
-    tft.fillRect(10, 12, 220, 16, TFT_BLACK);
+    tft.fillRect(10, 12, 210, 16, TFT_BLACK);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextSize(2);
     tft.setCursor(10, 12);
     tft.printf("L%d %02lu:%02lu", playerLevel, survivalTimeSec / 60, survivalTimeSec % 60);
 
-    tft.fillRect(SCREEN_W - 70, 12, 60, 16, TFT_BLACK);
+    // Clears X: 228 to 312, leaving 8px margin from right edge
+    tft.fillRect(228, 12, 84, 16, TFT_BLACK);
     if (millis() - lastBombTime >= BOMB_COOLDOWN) {
       tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-      tft.setCursor(SCREEN_W - 65, 12);
+      tft.setCursor(232, 12); // Fits 6 chars at size 2 (72px wide: 232 to 304)
       tft.print("[BOMB]");
     }
   }
@@ -574,14 +573,23 @@ void updateGameOverScreen() {
     tft.setTextFont(1);
     tft.setTextColor(TFT_RED, TFT_BLACK);
     tft.setTextSize(5);
-    tft.drawString("YOU DIED", 40, 100);
+    tft.drawString("YOU DIED", 40, 80);
 
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextSize(3);
-    tft.setCursor(50, 190);
-    tft.printf("Survived: %lus", survivalTimeSec);
-    tft.setCursor(50, 240);
-    tft.printf("Kills: %d  Lv:%d", killCount, playerLevel);
+
+    // Line 1: Survived Time
+    tft.setCursor(45, 170);
+    tft.printf("Time: %lus", survivalTimeSec);
+
+    // Line 2: Kills
+    tft.setCursor(45, 215);
+    tft.printf("Kills: %d", killCount);
+
+    // Line 3: Level reached (dedicated clean line)
+    tft.setCursor(45, 260);
+    tft.printf("Level: %d", playerLevel);
+
     gameOverScreenDrawn = true;
   }
 
@@ -625,7 +633,7 @@ void setup() {
   initBacklight();
 
   tft.init();
-  tft.setRotation(2); // ปรับเป็นแนวตั้ง Portrait (320 x 480)
+  tft.setRotation(2); // Inverted portrait orientation matching your breadboard
   tft.fillScreen(TFT_BLACK);
 
   stateEnterTime = millis();
